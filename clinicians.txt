@@ -1,0 +1,2 @@
+# One clinician name per line. These speakers get CLIN labels.
+Dana Whitfield

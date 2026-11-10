@@ -16,6 +16,10 @@ EXIT_INPUT_PROBLEM = 1
 EXIT_MODEL_UNAVAILABLE = 2
 
 OUTPUT_DIR = Path("output")
+CLINICIANS_FILE = Path("clinicians.txt")
+EXTRA_NAMES_FILE = Path("names.txt")
+
+TITLES = {"dr", "mr", "mrs", "ms", "miss", "prof"}
 
 # Captions wrap long sentences, so an identifier may continue on the next line.
 # GAP allows one line break between words, but never a blank line.
@@ -94,32 +98,111 @@ def read_transcript(path):
         return unicodedata.normalize("NFC", handle.read())
 
 
-def find_speakers(text):
-    """List speaker names in order of first appearance; labels are numbered in this order."""
-    matches = (ZOOM_HEADER.match(line) for line in text.splitlines())
-    return list(dict.fromkeys(match.group(1) for match in matches if match))
+def load_names(path):
+    """Read one name per line, in NFC so the names match the transcript text."""
+    if not path.is_file():
+        return []
+    lines = unicodedata.normalize("NFC", path.read_text(encoding="utf-8-sig")).splitlines()
+    return [line.strip() for line in lines if line.strip() and not line.startswith("#")]
 
 
-def speech_blocks(text):
-    """Yield (offset, speech) for each stretch of text between header lines.
+def parse(text):
+    """Separate header lines from speech, so the two can never be treated alike.
 
-    Rules only ever see these blocks, so a header line cannot be altered by them.
+    Returns the speaker name in each header as (start, end, name), and each
+    stretch of speech between headers as (offset, speech).
     """
+    headers, blocks = [], []
     block_start = position = 0
     for line in text.splitlines(keepends=True):
-        if ZOOM_HEADER.match(line):
+        match = ZOOM_HEADER.match(line)
+        if match:
+            headers.append((position + match.start(1), position + match.end(1), match.group(1)))
             if position > block_start:
-                yield block_start, text[block_start:position]
+                blocks.append((block_start, text[block_start:position]))
             block_start = position + len(line)
         position += len(line)
     if position > block_start:
-        yield block_start, text[block_start:position]
+        blocks.append((block_start, text[block_start:position]))
+    return headers, blocks
 
 
-def find_rule_spans(text):
+def name_parts(name):
+    """Split a name into the parts worth matching alone.
+
+    Short parts, lowercase parts and titles are left out because they would
+    match ordinary words: "Dr" alone must not become a label.
+    """
+    words = [word.strip(".,") for word in name.split()]
+    return [word for word in words
+            if len(word) >= 3 and word[0].isupper() and word.casefold() not in TITLES]
+
+
+class Registry:
+    """The name-to-label key for one transcript. It lives in memory only, never on disk."""
+
+    def __init__(self):
+        self.labels = {}
+        self.counts = Counter()
+
+    def new_label(self, prefix):
+        self.counts[prefix] += 1
+        return f"{prefix}-{self.counts[prefix]}"
+
+    def register(self, name, label):
+        """Point a full name and its parts at one label; the first owner of a part keeps it."""
+        for form in [name, *name_parts(name)]:
+            self.labels.setdefault(form, label)
+
+    def add_speaker(self, name, is_clinician):
+        if name not in self.labels:
+            self.register(name, self.new_label("CLIN" if is_clinician else "CLIENT"))
+
+    def add_person(self, name):
+        """Reuse the label of anyone already known by this name or one of its parts."""
+        known = [self.labels[form] for form in [name, *name_parts(name)] if form in self.labels]
+        self.register(name, known[0] if known else self.new_label("PERSON"))
+
+
+def build_registry(headers, clinicians, extra_names):
+    """Label speakers in order of first appearance, then the extra names."""
+    clinician_keys = {" ".join(name.split()).casefold() for name in clinicians}
+    registry = Registry()
+    for _, _, speaker in headers:
+        registry.add_speaker(speaker, " ".join(speaker.split()).casefold() in clinician_keys)
+    for name in extra_names:
+        registry.add_person(name)
+    return registry
+
+
+def find_header_spans(headers, registry):
+    """Replace only the name inside each header, so the brackets and timestamp stay."""
+    return [(start, end, registry.labels[name]) for start, end, name in headers]
+
+
+def find_name_spans(blocks, registry):
+    """Find every registered name in speech, trying longer names first.
+
+    Matching is case-sensitive with word boundaries, so "Will" the person is
+    found but "will" the verb and "Willow" are not.
+    """
+    if not registry.labels:
+        return []
+    longest_first = sorted(registry.labels, key=len, reverse=True)
+    alternatives = "|".join(GAP.join(map(re.escape, name.split())) for name in longest_first)
+    pattern = re.compile(rf"(?<!\w)(?:{alternatives})(?!\w)")
+    spans = []
+    for offset, speech in blocks:
+        for match in pattern.finditer(speech):
+            name = " ".join(match.group().split())
+            spans.append((offset + match.start(), offset + match.end(), registry.labels[name]))
+    return spans
+
+
+def find_rule_spans(blocks):
     """Collect (start, end, label) for every rule match, as positions in the full text."""
     spans = []
-    for offset, speech in speech_blocks(text):
+    for offset, speech in blocks:
         for label, pattern in RULES:
             for match in pattern.finditer(speech):
                 start, end = match.span(pattern.groups)
@@ -181,6 +264,8 @@ def main():
               "Run again with --no-model to apply the rules only.")
         return EXIT_MODEL_UNAVAILABLE
 
+    clinicians = load_names(CLINICIANS_FILE)
+    extra_names = load_names(EXTRA_NAMES_FILE)
     transcripts = find_transcripts(args.path)
     if not transcripts:
         print(f"No .txt transcripts found at '{args.path}'. Check the path and try again.")
@@ -192,14 +277,19 @@ def main():
         except (OSError, UnicodeDecodeError) as error:
             print(f"Could not read '{transcript}': {error}")
             return EXIT_INPUT_PROBLEM
-        spans = keep_longest(find_rule_spans(text))
+        headers, blocks = parse(text)
+        registry = build_registry(headers, clinicians, extra_names)
+        spans = keep_longest(
+            find_header_spans(headers, registry)
+            + find_name_spans(blocks, registry)
+            + find_rule_spans(blocks)
+        )
         output_path = OUTPUT_DIR / f"{transcript.stem}_scrubbed_RULES_ONLY.txt"
         write_safely(output_path, apply_spans(text, spans))
 
-        counts = Counter(label for _, _, label in spans)
+        counts = Counter(label.rstrip("-0123456789") for _, _, label in spans)
         summary = ", ".join(f"{count} {label}" for label, count in sorted(counts.items()))
-        print(f"{transcript.name}: {len(find_speakers(text))} speakers, "
-              f"{summary or 'nothing replaced'} -> {output_path}")
+        print(f"{transcript.name}: {summary or 'nothing replaced'} -> {output_path}")
     return EXIT_OK
 
 
