@@ -16,6 +16,7 @@ ZOOM_HEADER = re.compile(r"^\[(.+?)\]\s+(\d{1,2}):(\d{2}):(\d{2})\s*$")
 EXIT_OK = 0
 EXIT_INPUT_PROBLEM = 1
 EXIT_MODEL_UNAVAILABLE = 2
+EXIT_MODEL_UNREADABLE = 3
 
 OLLAMA_URL = "http://127.0.0.1:11434"
 DEFAULT_MODEL = "qwen2.5:3b"
@@ -23,6 +24,57 @@ DEFAULT_MODEL = "qwen2.5:3b"
 # An opener with an empty proxy list ignores any proxy configured on this Mac,
 # so requests can only ever go straight to the local Ollama address above.
 OLLAMA = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+# Small chunks keep each request well inside the model's context window. The
+# overlap gives a name that sits on a chunk boundary a second chance to be seen.
+CHUNK_CHARS = 1500
+OVERLAP_LINES = 2
+MODEL_TIMEOUT_SECONDS = 300
+
+ENTITY_TYPES = ("person", "location", "school", "workplace")
+
+# The reply format is enforced by Ollama: a list of identifiers and nothing
+# else, so the model has no way to hand back rewritten transcript text.
+ENTITY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "entities": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string"},
+                    "type": {"type": "string", "enum": list(ENTITY_TYPES)},
+                },
+                "required": ["text", "type"],
+            },
+        }
+    },
+    "required": ["entities"],
+}
+
+MODEL_INSTRUCTIONS = (
+    "You find identifying details in therapy session transcripts. List every "
+    "person, location, school and workplace named in the text. Copy each one "
+    "exactly as it is written.\n"
+    "person: names of people, whether a first name, a surname or a full name. "
+    "Not words like mom, sister or doctor.\n"
+    "location: cities, towns, neighbourhoods, counties, states, streets.\n"
+    "school: schools, colleges, universities.\n"
+    "workplace: employers, companies, hospitals, clinics, agencies.\n"
+    "Do not list dates, numbers or ordinary words. If there is nothing to "
+    "list, return an empty list."
+)
+EXAMPLE_TEXT = (
+    "My brother Tomás got a job at Riverside Hardware in Tacoma. "
+    "His daughter goes to Lincoln High."
+)
+EXAMPLE_REPLY = json.dumps({"entities": [
+    {"text": "Tomás", "type": "person"},
+    {"text": "Riverside Hardware", "type": "workplace"},
+    {"text": "Tacoma", "type": "location"},
+    {"text": "Lincoln High", "type": "school"},
+]}, ensure_ascii=False)
 
 OUTPUT_DIR = Path("output")
 CLINICIANS_FILE = Path("clinicians.txt")
@@ -120,6 +172,63 @@ def check_model_ready(model):
             f"Ollama is running but the model '{model}' is not installed, so nothing "
             f"was scrubbed. Install it with:  ollama pull {model}"
         ))
+
+
+def chunk_speech(blocks):
+    """Group the speech lines into overlapping chunks; header lines are never sent."""
+    lines = [line for _, speech in blocks for line in speech.splitlines() if line.strip()]
+    chunks, current, fresh_lines = [], [], 0
+    for line in lines:
+        current.append(line)
+        fresh_lines += 1
+        if sum(map(len, current)) >= CHUNK_CHARS:
+            chunks.append("\n".join(current))
+            current = current[-OVERLAP_LINES:]
+            fresh_lines = 0
+    if fresh_lines:
+        chunks.append("\n".join(current))
+    return chunks
+
+
+def read_entities(model, chunk):
+    """Ask the model once for the identifiers in a chunk, as (text, type) pairs.
+
+    Fixed temperature and seed make the same transcript give the same result
+    on every run. Raises ValueError, KeyError or TypeError on an unusable reply.
+    """
+    reply = ask_ollama("/api/chat", {
+        "model": model,
+        "stream": False,
+        "format": ENTITY_SCHEMA,
+        "options": {"temperature": 0, "seed": 42, "num_ctx": 4096},
+        "messages": [
+            {"role": "system", "content": MODEL_INSTRUCTIONS},
+            {"role": "user", "content": EXAMPLE_TEXT},
+            {"role": "assistant", "content": EXAMPLE_REPLY},
+            {"role": "user", "content": chunk},
+        ],
+    }, timeout=MODEL_TIMEOUT_SECONDS)
+    entities = json.loads(reply["message"]["content"])["entities"]
+    return [(entity["text"], entity["type"]) for entity in entities
+            if isinstance(entity["text"], str) and entity["type"] in ENTITY_TYPES]
+
+
+def find_model_entities(model, chunk):
+    """Get the model's identifiers for a chunk, allowing one retry before giving up."""
+    for _ in range(2):
+        try:
+            return read_entities(model, chunk)
+        except OSError:
+            raise StopRun(EXIT_MODEL_UNAVAILABLE, (
+                "Ollama stopped responding part-way through, so nothing was written "
+                "for this file. Check the Ollama app is open and run this again."
+            )) from None
+        except (ValueError, KeyError, TypeError):
+            continue
+    raise StopRun(EXIT_MODEL_UNREADABLE, (
+        "The model gave an unreadable answer twice in a row, so nothing was written "
+        "for this file. Run it again, or try a different model with --model."
+    ))
 
 
 def find_transcripts(path):
@@ -316,9 +425,6 @@ def run():
 
     if not args.no_model:
         check_model_ready(args.model)
-        print(f"Ollama is running and '{args.model}' is installed. Model detection is "
-              "the next part to build, so nothing was scrubbed. Use --no-model for now.")
-        return EXIT_OK
 
     clinicians = load_names(CLINICIANS_FILE)
     extra_names = load_names(EXTRA_NAMES_FILE)
@@ -334,6 +440,14 @@ def run():
             print(f"Could not read '{transcript}': {error}")
             return EXIT_INPUT_PROBLEM
         headers, blocks = parse(text)
+        if not args.no_model:
+            chunks = chunk_speech(blocks)
+            print(f"{transcript.name}: asking '{args.model}' about {len(chunks)} chunks. "
+                  "Replacing what it finds is the next part to build, so nothing was written.")
+            for number, chunk in enumerate(chunks, start=1):
+                for entity_text, entity_type in find_model_entities(args.model, chunk):
+                    print(f"  chunk {number}: {entity_type:<9} {entity_text}")
+            continue
         registry = build_registry(headers, clinicians, extra_names)
         spans = keep_longest(
             find_header_spans(headers, registry)
