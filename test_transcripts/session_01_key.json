@@ -1,0 +1,27 @@
+{
+  "must_remove": {
+    "speaker names": ["Dana", "Whitfield", "Marisol", "Peña"],
+    "people mentioned": ["Lucía", "Greg", "Hanley", "Mateo"],
+    "dates": ["March 3rd", "10/14", "October 9th"],
+    "locations": ["Fort Lauderdale", "Kendall"],
+    "phone numbers": ["555-0142"],
+    "ages": ["I'm 34", "61 years old", "turned 12"],
+    "workplaces": ["Baptist Health", "Publix"],
+    "schools": ["Coral Reef Elementary", "Miami Dade College"],
+    "emails": ["dwhitfield@riverbendcounseling.org"],
+    "addresses": ["4100 NW 7th Street"]
+  },
+  "must_keep": [
+    "Kind of a mess.",
+    "May I ask what made it a mess?",
+    "I just sat in the car for an hour before I could go in.",
+    "I think I was scared of what I'd find.",
+    "It's like 50/50",
+    "My mom's, probably.",
+    "God, I don't know.",
+    "Every March it gets worse, it's like 24/7",
+    "Will that make it harder to set the limit we talked about?",
+    "I'm 5 minutes from her place",
+    "moved back in 2019"
+  ]
+}
