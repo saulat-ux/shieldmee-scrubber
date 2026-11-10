@@ -1,0 +1,4 @@
+# Real transcripts and their scrubbed results must never be committed.
+input/
+output/
+__pycache__/
