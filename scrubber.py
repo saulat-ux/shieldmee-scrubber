@@ -1,11 +1,13 @@
 """Replace identifiers in therapy transcripts with coded labels. See PROJECT.md."""
 
 import argparse
+import json
 import os
 import re
 import sys
 import tempfile
 import unicodedata
+import urllib.request
 from collections import Counter
 from pathlib import Path
 
@@ -14,6 +16,13 @@ ZOOM_HEADER = re.compile(r"^\[(.+?)\]\s+(\d{1,2}):(\d{2}):(\d{2})\s*$")
 EXIT_OK = 0
 EXIT_INPUT_PROBLEM = 1
 EXIT_MODEL_UNAVAILABLE = 2
+
+OLLAMA_URL = "http://127.0.0.1:11434"
+DEFAULT_MODEL = "qwen2.5:3b"
+
+# An opener with an empty proxy list ignores any proxy configured on this Mac,
+# so requests can only ever go straight to the local Ollama address above.
+OLLAMA = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 OUTPUT_DIR = Path("output")
 CLINICIANS_FILE = Path("clinicians.txt")
@@ -76,6 +85,41 @@ RULES = [
         rf"(?<![\w/])(\d{{1,3}})(?:{GAP}|-)(?:years?|yrs?|months?)(?:{GAP}|-)old\b"
     )),
 ]
+
+
+class StopRun(Exception):
+    """A problem that must end the run without writing output: fail closed."""
+
+    def __init__(self, exit_code, message):
+        super().__init__(message)
+        self.exit_code = exit_code
+        self.message = message
+
+
+def ask_ollama(path, payload=None, timeout=10):
+    """Send one request to local Ollama; the only place this script touches a network."""
+    data = None if payload is None else json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        OLLAMA_URL + path, data=data, headers={"Content-Type": "application/json"}
+    )
+    with OLLAMA.open(request, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def check_model_ready(model):
+    """Confirm Ollama is up and has the model before any transcript is touched."""
+    try:
+        installed = {entry["name"] for entry in ask_ollama("/api/tags")["models"]}
+    except (OSError, ValueError, KeyError, TypeError):
+        raise StopRun(EXIT_MODEL_UNAVAILABLE, (
+            "Ollama is not running, so nothing was scrubbed. "
+            "Open the Ollama app (llama icon in the menu bar) and run this again."
+        )) from None
+    if model not in installed and f"{model}:latest" not in installed:
+        raise StopRun(EXIT_MODEL_UNAVAILABLE, (
+            f"Ollama is running but the model '{model}' is not installed, so nothing "
+            f"was scrubbed. Install it with:  ollama pull {model}"
+        ))
 
 
 def find_transcripts(path):
@@ -252,17 +296,29 @@ def write_safely(path, text):
 
 
 def main():
+    """Turn a StopRun raised anywhere into its plain message and exit code."""
+    try:
+        return run()
+    except StopRun as stop:
+        print(stop.message)
+        return stop.exit_code
+
+
+def run():
     parser = argparse.ArgumentParser(description="Scrub identifiers from Zoom transcripts.")
     parser.add_argument("path", nargs="?", default="input", type=Path,
                         help="a transcript file or a folder of .txt files (default: input/)")
     parser.add_argument("--no-model", action="store_true",
                         help="rules only, for development; output is named *_RULES_ONLY.txt")
+    parser.add_argument("--model", default=DEFAULT_MODEL,
+                        help=f"the Ollama model to use (default: {DEFAULT_MODEL})")
     args = parser.parse_args()
 
     if not args.no_model:
-        print("The model layer is not built yet, so a full scrub is not possible. "
-              "Run again with --no-model to apply the rules only.")
-        return EXIT_MODEL_UNAVAILABLE
+        check_model_ready(args.model)
+        print(f"Ollama is running and '{args.model}' is installed. Model detection is "
+              "the next part to build, so nothing was scrubbed. Use --no-model for now.")
+        return EXIT_OK
 
     clinicians = load_names(CLINICIANS_FILE)
     extra_names = load_names(EXTRA_NAMES_FILE)
