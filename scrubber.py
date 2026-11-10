@@ -82,6 +82,19 @@ EXTRA_NAMES_FILE = Path("names.txt")
 
 TITLES = {"dr", "mr", "mrs", "ms", "miss", "prof"}
 
+PLACE_LABELS = {"location": "[LOCATION]", "school": "[SCHOOL]", "workplace": "[WORKPLACE]"}
+
+# Capitalised words the model sometimes reports that are not identifiers.
+# "May" and "Will" are here so "May I ask" and "Will that" survive; a person
+# with one of these names is caught from a header line or names.txt instead.
+NOT_IDENTIFIERS = {
+    "mom", "mum", "mommy", "mama", "mother", "dad", "daddy", "papa", "father",
+    "god", "lord", "client", "therapist", "counselor", "doctor", "may", "will",
+    "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+    "january", "february", "march", "april", "june", "july", "august",
+    "september", "october", "november", "december",
+}
+
 # Captions wrap long sentences, so an identifier may continue on the next line.
 # GAP allows one line break between words, but never a blank line.
 GAP = r"(?:[ \t]+|[ \t]*\r?\n[ \t]*)"
@@ -231,6 +244,58 @@ def find_model_entities(model, chunk):
     ))
 
 
+def clean_entity(text, entity_type):
+    """Cut a model answer down to the identifier itself.
+
+    "my sister Lucía" becomes "Lucía" and "Greg's cousin" becomes "Greg", so
+    the ordinary words around a name are never replaced along with it.
+    """
+    words = text.split()
+    while words and words[0][0].islower():
+        words.pop(0)
+    while words and words[-1][0].islower():
+        words.pop()
+    if entity_type == "person":
+        while words and words[0].strip(".").casefold() in TITLES:
+            words.pop(0)
+    cleaned = " ".join(words).strip(".,;:!?\"'’()")
+    return re.sub(rf"{APOSTROPHE}s$", "", cleaned)
+
+
+def is_usable(entity, chunk_text):
+    """Accept a model answer only if it is really in the chunk and looks like a name.
+
+    The word-for-word check is what stops an invented or reworded answer from
+    ever reaching the transcript.
+    """
+    return (
+        len(entity) >= 2
+        and any(character.isupper() for character in entity)
+        and entity.casefold() not in NOT_IDENTIFIERS
+        and entity in chunk_text
+    )
+
+
+def detect_with_model(model, blocks, registry):
+    """Ask the model about every chunk and keep only the answers that pass the checks.
+
+    People are added to the registry so they get consistent PERSON labels.
+    Places, schools and workplaces are returned as {text: label}.
+    """
+    places = {}
+    for chunk in chunk_speech(blocks):
+        chunk_text = " ".join(chunk.split())
+        for raw_text, entity_type in find_model_entities(model, chunk):
+            entity = clean_entity(raw_text, entity_type)
+            if not is_usable(entity, chunk_text):
+                continue
+            if entity_type == "person":
+                registry.add_person(entity)
+            else:
+                places.setdefault(entity, PLACE_LABELS[entity_type])
+    return places
+
+
 def find_transcripts(path):
     """Accept a single file or a folder, so one command covers both uses."""
     if path.is_file():
@@ -333,22 +398,24 @@ def find_header_spans(headers, registry):
     return [(start, end, registry.labels[name]) for start, end, name in headers]
 
 
-def find_name_spans(blocks, registry):
-    """Find every registered name in speech, trying longer names first.
+def find_term_spans(blocks, labels):
+    """Find every known name or place in speech, trying longer ones first.
 
     Matching is case-sensitive with word boundaries, so "Will" the person is
-    found but "will" the verb and "Willow" are not.
+    found but "will" the verb and "Willow" are not. A term may continue across
+    a line break, because captions wrap mid-name.
     """
-    if not registry.labels:
+    lookup = {" ".join(term.split()): label for term, label in labels.items()}
+    if not lookup:
         return []
-    longest_first = sorted(registry.labels, key=len, reverse=True)
-    alternatives = "|".join(GAP.join(map(re.escape, name.split())) for name in longest_first)
+    longest_first = sorted(lookup, key=len, reverse=True)
+    alternatives = "|".join(GAP.join(map(re.escape, term.split())) for term in longest_first)
     pattern = re.compile(rf"(?<!\w)(?:{alternatives})(?!\w)")
     spans = []
     for offset, speech in blocks:
         for match in pattern.finditer(speech):
-            name = " ".join(match.group().split())
-            spans.append((offset + match.start(), offset + match.end(), registry.labels[name]))
+            term = " ".join(match.group().split())
+            spans.append((offset + match.start(), offset + match.end(), lookup[term]))
     return spans
 
 
@@ -440,21 +507,15 @@ def run():
             print(f"Could not read '{transcript}': {error}")
             return EXIT_INPUT_PROBLEM
         headers, blocks = parse(text)
-        if not args.no_model:
-            chunks = chunk_speech(blocks)
-            print(f"{transcript.name}: asking '{args.model}' about {len(chunks)} chunks. "
-                  "Replacing what it finds is the next part to build, so nothing was written.")
-            for number, chunk in enumerate(chunks, start=1):
-                for entity_text, entity_type in find_model_entities(args.model, chunk):
-                    print(f"  chunk {number}: {entity_type:<9} {entity_text}")
-            continue
         registry = build_registry(headers, clinicians, extra_names)
+        places = {} if args.no_model else detect_with_model(args.model, blocks, registry)
         spans = keep_longest(
-            find_header_spans(headers, registry)
-            + find_name_spans(blocks, registry)
-            + find_rule_spans(blocks)
+            find_rule_spans(blocks)
+            + find_header_spans(headers, registry)
+            + find_term_spans(blocks, {**places, **registry.labels})
         )
-        output_path = OUTPUT_DIR / f"{transcript.stem}_scrubbed_RULES_ONLY.txt"
+        suffix = "_scrubbed_RULES_ONLY.txt" if args.no_model else "_scrubbed.txt"
+        output_path = OUTPUT_DIR / f"{transcript.stem}{suffix}"
         write_safely(output_path, apply_spans(text, spans))
 
         counts = Counter(label.rstrip("-0123456789") for _, _, label in spans)
