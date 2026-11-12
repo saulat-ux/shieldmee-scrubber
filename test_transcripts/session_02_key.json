@@ -1,0 +1,27 @@
+{
+  "must_remove": {
+    "speaker names": ["Dana", "Whitfield", "Tomasz", "Ewa", "Kowalski"],
+    "people mentioned": ["Radek", "Nowak", "Zofia", "Okafor"],
+    "dates": ["9/22", "May 2nd", "November 14th", "11/18"],
+    "locations": ["Parma", "Cleveland Heights"],
+    "phone numbers": ["216-555-0187"],
+    "ages": ["I'm 47", "78 years old", "is 9 and"],
+    "workplaces": ["Northgate Logistics", "Harlow & Finch"],
+    "schools": ["Maple Grove Academy"],
+    "emails": ["j.alvarez@lakeshorecareers.example"],
+    "addresses": ["2218 Birchwood Avenue"]
+  },
+  "must_keep": [
+    "he barely talks to me.",
+    "last Tuesday and heard nothing.",
+    "drive 40 minutes each way for half the pay.",
+    "your mother, tells everyone at church that I'm lazy.",
+    "May was the worst month of my life.",
+    "Will you say more about May?",
+    "she asks me why daddy",
+    "I'd do anything for her, 100 percent.",
+    "On a scale of 1 to 10, how willing are you both to",
+    "Maybe a 6.",
+    "That would mean a lot."
+  ]
+}

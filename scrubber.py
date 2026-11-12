@@ -34,27 +34,54 @@ MODEL_TIMEOUT_SECONDS = 300
 
 ENTITY_TYPES = ("person", "location", "school", "workplace")
 
-# The reply format is enforced by Ollama: a list of identifiers and nothing
-# else, so the model has no way to hand back rewritten transcript text.
-ENTITY_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "entities": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "text": {"type": "string"},
-                    "type": {"type": "string", "enum": list(ENTITY_TYPES)},
-                },
-                "required": ["text", "type"],
-            },
-        }
-    },
-    "required": ["entities"],
-}
+def entity_schema(types):
+    """Describe the only reply Ollama will accept: a list of identifiers.
 
-MODEL_INSTRUCTIONS = (
+    Enforcing this format means the model has no way to hand back rewritten
+    transcript text.
+    """
+    return {
+        "type": "object",
+        "properties": {
+            "entities": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "text": {"type": "string"},
+                        "type": {"type": "string", "enum": list(types)},
+                    },
+                    "required": ["text", "type"],
+                },
+            }
+        },
+        "required": ["entities"],
+    }
+
+
+def example_reply(entities):
+    return json.dumps(
+        {"entities": [{"text": text, "type": kind} for text, kind in entities]},
+        ensure_ascii=False,
+    )
+
+
+# Each chunk is put to the model twice. A small model asked for everything at
+# once overlooks most people's names; asked about people alone it finds them.
+# Each question is (instructions, example text, example reply, allowed types).
+PEOPLE_QUESTION = (
+    "You find the names of people in therapy session transcripts. List every "
+    "person's name that appears in the text: first names, surnames and full "
+    "names, including a name that follows a title such as Mr., Mrs., Dr., Coach "
+    "or Principal. Copy each name exactly as it is written. Do not list words "
+    "like mom, dad, sister or doctor. If there are no names, return an empty list.",
+    "And Tomás, how is he? My cousin Bianca saw him with Mr. Petrov. Coach "
+    "Lindqvist said he missed practice.",
+    example_reply([("Tomás", "person"), ("Bianca", "person"),
+                   ("Petrov", "person"), ("Lindqvist", "person")]),
+    ("person",),
+)
+EVERYTHING_QUESTION = (
     "You find identifying details in therapy session transcripts. List every "
     "person, location, school and workplace named in the text. Copy each one "
     "exactly as it is written.\n"
@@ -64,24 +91,31 @@ MODEL_INSTRUCTIONS = (
     "school: schools, colleges, universities.\n"
     "workplace: employers, companies, hospitals, clinics, agencies.\n"
     "Do not list dates, numbers or ordinary words. If there is nothing to "
-    "list, return an empty list."
-)
-EXAMPLE_TEXT = (
+    "list, return an empty list.",
     "My brother Tomás got a job at Riverside Hardware in Tacoma. "
-    "His daughter goes to Lincoln High."
+    "His daughter goes to Lincoln High.",
+    example_reply([("Tomás", "person"), ("Riverside Hardware", "workplace"),
+                   ("Tacoma", "location"), ("Lincoln High", "school")]),
+    ENTITY_TYPES,
 )
-EXAMPLE_REPLY = json.dumps({"entities": [
-    {"text": "Tomás", "type": "person"},
-    {"text": "Riverside Hardware", "type": "workplace"},
-    {"text": "Tacoma", "type": "location"},
-    {"text": "Lincoln High", "type": "school"},
-]}, ensure_ascii=False)
+QUESTIONS = (PEOPLE_QUESTION, EVERYTHING_QUESTION)
+
+# A second attempt uses a different seed, because repeating the first seed
+# would only reproduce the same unreadable answer.
+ATTEMPT_SEEDS = (42, 43)
+MAX_REPLY_TOKENS = 600
 
 OUTPUT_DIR = Path("output")
 CLINICIANS_FILE = Path("clinicians.txt")
 EXTRA_NAMES_FILE = Path("names.txt")
 
-TITLES = {"dr", "mr", "mrs", "ms", "miss", "prof"}
+# A capitalised word straight after one of these is a person's name, which
+# gives a dependable way to catch "Coach Ramirez" without relying on the model.
+PERSON_TITLES = (
+    "Mr", "Mrs", "Ms", "Dr", "Prof", "Professor", "Coach", "Principal", "Pastor",
+    "Officer", "Judge", "Nurse", "Aunt", "Uncle", "Grandma", "Grandpa",
+)
+TITLES = {title.casefold() for title in PERSON_TITLES} | {"miss"}
 
 PLACE_LABELS = {"location": "[LOCATION]", "school": "[SCHOOL]", "workplace": "[WORKPLACE]"}
 
@@ -124,7 +158,9 @@ NOT_AN_AGE_WORD = (
 AGE_NUMBER = rf"(\d{{1,3}})(?![\w/:%'’-]|\.\d|{GAP}(?:{NOT_AN_AGE_WORD})\b)"
 AGE_LEAD_IN = (
     rf"(?:I{APOSTROPHE}m|I am|I was|(?:[Hh]e|[Ss]he|[Ww]ho){APOSTROPHE}s"
-    rf"|(?:[Hh]e|[Ss]he|[Ww]ho) (?:is|was)|[Yy]ou{APOSTROPHE}re|[Yy]ou (?:are|were))"
+    rf"|(?:[Hh]e|[Ss]he|[Ww]ho) (?:is|was)|[Yy]ou{APOSTROPHE}re|[Yy]ou (?:are|were)"
+    r"|(?!(?:It|That|This|There|Here|What|Which|Everything|Nothing|Something)\b)"
+    rf"[A-Z][\w'’-]+ (?:is|was))"
     rf"(?:{GAP}(?:just|only|almost|nearly|about|already))?"
 )
 
@@ -204,34 +240,37 @@ def chunk_speech(blocks):
     return chunks
 
 
-def read_entities(model, chunk):
-    """Ask the model once for the identifiers in a chunk, as (text, type) pairs.
+def read_entities(model, question, chunk, seed):
+    """Put one question to the model about a chunk; returns (text, type) pairs.
 
-    Fixed temperature and seed make the same transcript give the same result
-    on every run. Raises ValueError, KeyError or TypeError on an unusable reply.
+    Temperature 0 and a fixed seed make the same transcript give the same
+    result on every run. The reply length is capped so a model stuck repeating
+    itself fails fast. Raises ValueError, KeyError or TypeError on an unusable reply.
     """
+    instructions, example_text, example_answer, types = question
     reply = ask_ollama("/api/chat", {
         "model": model,
         "stream": False,
-        "format": ENTITY_SCHEMA,
-        "options": {"temperature": 0, "seed": 42, "num_ctx": 4096},
+        "format": entity_schema(types),
+        "options": {"temperature": 0, "seed": seed, "num_ctx": 4096,
+                    "num_predict": MAX_REPLY_TOKENS},
         "messages": [
-            {"role": "system", "content": MODEL_INSTRUCTIONS},
-            {"role": "user", "content": EXAMPLE_TEXT},
-            {"role": "assistant", "content": EXAMPLE_REPLY},
+            {"role": "system", "content": instructions},
+            {"role": "user", "content": example_text},
+            {"role": "assistant", "content": example_answer},
             {"role": "user", "content": chunk},
         ],
     }, timeout=MODEL_TIMEOUT_SECONDS)
     entities = json.loads(reply["message"]["content"])["entities"]
     return [(entity["text"], entity["type"]) for entity in entities
-            if isinstance(entity["text"], str) and entity["type"] in ENTITY_TYPES]
+            if isinstance(entity["text"], str) and entity["type"] in types]
 
 
-def find_model_entities(model, chunk):
-    """Get the model's identifiers for a chunk, allowing one retry before giving up."""
-    for _ in range(2):
+def find_model_entities(model, question, chunk):
+    """Get the model's answer to one question, allowing one retry before giving up."""
+    for seed in ATTEMPT_SEEDS:
         try:
-            return read_entities(model, chunk)
+            return read_entities(model, question, chunk, seed)
         except OSError:
             raise StopRun(EXIT_MODEL_UNAVAILABLE, (
                 "Ollama stopped responding part-way through, so nothing was written "
@@ -283,18 +322,48 @@ def detect_with_model(model, blocks, registry):
     People are added to the registry so they get consistent PERSON labels.
     Places, schools and workplaces are returned as {text: label}.
     """
-    places = {}
+    answers = []
     for chunk in chunk_speech(blocks):
         chunk_text = " ".join(chunk.split())
-        for raw_text, entity_type in find_model_entities(model, chunk):
-            entity = clean_entity(raw_text, entity_type)
-            if not is_usable(entity, chunk_text):
-                continue
-            if entity_type == "person":
-                registry.add_person(entity)
-            else:
-                places.setdefault(entity, PLACE_LABELS[entity_type])
+        for question in QUESTIONS:
+            for raw_text, entity_type in find_model_entities(model, question, chunk):
+                entity = clean_entity(raw_text, entity_type)
+                if is_usable(entity, chunk_text):
+                    answers.append((entity, entity_type, question))
+    people, places = settle_types(answers)
+    speech_text = " ".join(" ".join(speech.split()) for _, speech in blocks)
+    for name in join_adjacent_names(people, speech_text) + people:
+        registry.add_person(name)
     return places
+
+
+def settle_types(answers):
+    """Decide what each answer is when the two questions disagree.
+
+    The people question can only say "person", so it calls a college a person
+    too; there the everything question's school or workplace is believed. But
+    once the everything question has itself called something a person, it
+    stays a person.
+    """
+    sure_people = {entity for entity, entity_type, question in answers
+                   if entity_type == "person" and question is EVERYTHING_QUESTION}
+    places = {}
+    for entity, entity_type, _ in answers:
+        if entity_type != "person" and entity not in sure_people:
+            places.setdefault(entity, PLACE_LABELS[entity_type])
+    people = [entity for entity, entity_type, _ in answers
+              if entity_type == "person" and entity not in places]
+    return list(dict.fromkeys(people)), places
+
+
+def join_adjacent_names(people, speech_text):
+    """Rebuild full names the model reported in pieces.
+
+    If "Tyler" and "Brandt" were found separately and "Tyler Brandt" appears
+    in the speech, registering the full name first gives both one label.
+    """
+    return [f"{first} {last}" for first in people for last in people
+            if first != last and re.search(rf"(?<!\w){re.escape(f'{first} {last}')}(?!\w)", speech_text)]
 
 
 def find_transcripts(path):
@@ -392,6 +461,17 @@ def build_registry(headers, clinicians, extra_names):
     for name in extra_names:
         registry.add_person(name)
     return registry
+
+
+def add_titled_names(blocks, registry):
+    """Register every name that follows a title, such as "Mr. Hanley" or "Coach Ramirez"."""
+    titles = "|".join(PERSON_TITLES)
+    pattern = re.compile(rf"\b(?:{titles})\.?{GAP}([A-Z][\w'’-]+)")
+    for _, speech in blocks:
+        for match in pattern.finditer(speech):
+            name = re.sub(rf"{APOSTROPHE}s$", "", match.group(1))
+            if name.casefold() not in NOT_IDENTIFIERS | TITLES:
+                registry.add_person(name)
 
 
 def find_header_spans(headers, registry):
@@ -546,6 +626,7 @@ def run():
             return EXIT_INPUT_PROBLEM
         headers, blocks = parse(text)
         registry = build_registry(headers, clinicians, extra_names)
+        add_titled_names(blocks, registry)
         places = {} if args.no_model else detect_with_model(args.model, blocks, registry)
         terms = {**places, **registry.labels}
         spans = keep_longest(

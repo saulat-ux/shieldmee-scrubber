@@ -1,0 +1,27 @@
+{
+  "must_remove": {
+    "speaker names": ["Andre", "Baptiste", "Jordan", "Renee", "Ellis"],
+    "people mentioned": ["Tyler", "Brandt", "Marcus", "Ramirez", "Aaliyah", "Okonkwo"],
+    "dates": ["2/6", "January 20, 2026", "3rd of March"],
+    "locations": ["Tucson", "Glendale"],
+    "phone numbers": ["602.555.0119"],
+    "ages": ["I was 10", "I'm 41", "I'm 15", "turned 19"],
+    "workplaces": ["Desert Valley Medical Center", "Fry", "Halvorsen Engineering"],
+    "schools": ["Westbrook High", "Pinecrest Middle School", "Arizona State University"],
+    "emails": ["renee.ellis@dvmc.example"],
+    "addresses": ["87 Saguaro Court"]
+  },
+  "must_keep": [
+    "your mom tells me things have been rough at school.",
+    "I called the school three times.",
+    "He said something about my dad.",
+    "calls maybe twice a year.",
+    "says the same thing every Sunday.",
+    "I'm not stupid.",
+    "It's 24/7 drama there.",
+    "May I suggest we practice what",
+    "But only if Mom doesn't jump in.",
+    "I will try.",
+    "in the summer"
+  ]
+}
