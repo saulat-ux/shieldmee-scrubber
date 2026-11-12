@@ -17,6 +17,7 @@ EXIT_OK = 0
 EXIT_INPUT_PROBLEM = 1
 EXIT_MODEL_UNAVAILABLE = 2
 EXIT_MODEL_UNREADABLE = 3
+EXIT_SAFETY_CHECK_FAILED = 4
 
 OLLAMA_URL = "http://127.0.0.1:11434"
 DEFAULT_MODEL = "qwen2.5:3b"
@@ -398,6 +399,13 @@ def find_header_spans(headers, registry):
     return [(start, end, registry.labels[name]) for start, end, name in headers]
 
 
+def term_pattern(terms):
+    """Build one pattern matching any of the terms as whole words, longest first."""
+    longest_first = sorted(terms, key=len, reverse=True)
+    alternatives = "|".join(GAP.join(map(re.escape, term.split())) for term in longest_first)
+    return re.compile(rf"(?<!\w)(?:{alternatives})(?!\w)")
+
+
 def find_term_spans(blocks, labels):
     """Find every known name or place in speech, trying longer ones first.
 
@@ -408,9 +416,7 @@ def find_term_spans(blocks, labels):
     lookup = {" ".join(term.split()): label for term, label in labels.items()}
     if not lookup:
         return []
-    longest_first = sorted(lookup, key=len, reverse=True)
-    alternatives = "|".join(GAP.join(map(re.escape, term.split())) for term in longest_first)
-    pattern = re.compile(rf"(?<!\w)(?:{alternatives})(?!\w)")
+    pattern = term_pattern(lookup)
     spans = []
     for offset, speech in blocks:
         for match in pattern.finditer(speech):
@@ -455,6 +461,36 @@ def apply_spans(text, spans):
     return "".join(pieces)
 
 
+def check_scrubbed(name, original, scrubbed, terms):
+    """Refuse to release output that still holds a known identifier or lost a header.
+
+    This is an independent second look at the finished text, header lines
+    included, so a mistake in the replacement steps cannot slip out unnoticed.
+    """
+    known = [term for term in terms if len(term) >= 3]
+    survivors = sorted(set(term_pattern(known).findall(scrubbed))) if known else []
+    if survivors:
+        raise StopRun(EXIT_SAFETY_CHECK_FAILED, (
+            f"Safety check failed for {name}: {len(survivors)} known identifier(s) were "
+            "still in the result, so nothing was written for this file."
+        ))
+    if len(parse(scrubbed)[0]) != len(parse(original)[0]):
+        raise StopRun(EXIT_SAFETY_CHECK_FAILED, (
+            f"Safety check failed for {name}: the number of speaker header lines "
+            "changed, so nothing was written for this file."
+        ))
+
+
+def print_map(registry):
+    """Show who became which label, on screen only; the key must never reach a file."""
+    print("  Name-to-label map (shown on screen only, never saved to a file):")
+    by_label = {}
+    for name, label in registry.labels.items():
+        by_label.setdefault(label, []).append(name)
+    for label, names in by_label.items():
+        print(f"    {label}: {', '.join(names)}")
+
+
 def write_safely(path, text):
     """Write to a hidden temporary file and rename it, so a crash never leaves half a file."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -486,6 +522,8 @@ def run():
                         help="a transcript file or a folder of .txt files (default: input/)")
     parser.add_argument("--no-model", action="store_true",
                         help="rules only, for development; output is named *_RULES_ONLY.txt")
+    parser.add_argument("--show-map", action="store_true",
+                        help="print who became which label, on screen only")
     parser.add_argument("--model", default=DEFAULT_MODEL,
                         help=f"the Ollama model to use (default: {DEFAULT_MODEL})")
     args = parser.parse_args()
@@ -509,18 +547,23 @@ def run():
         headers, blocks = parse(text)
         registry = build_registry(headers, clinicians, extra_names)
         places = {} if args.no_model else detect_with_model(args.model, blocks, registry)
+        terms = {**places, **registry.labels}
         spans = keep_longest(
             find_rule_spans(blocks)
             + find_header_spans(headers, registry)
-            + find_term_spans(blocks, {**places, **registry.labels})
+            + find_term_spans(blocks, terms)
         )
+        scrubbed = apply_spans(text, spans)
+        check_scrubbed(transcript.name, text, scrubbed, terms)
         suffix = "_scrubbed_RULES_ONLY.txt" if args.no_model else "_scrubbed.txt"
         output_path = OUTPUT_DIR / f"{transcript.stem}{suffix}"
-        write_safely(output_path, apply_spans(text, spans))
+        write_safely(output_path, scrubbed)
 
         counts = Counter(label.rstrip("-0123456789") for _, _, label in spans)
         summary = ", ".join(f"{count} {label}" for label, count in sorted(counts.items()))
         print(f"{transcript.name}: {summary or 'nothing replaced'} -> {output_path}")
+        if args.show_map:
+            print_map(registry)
     return EXIT_OK
 
 
