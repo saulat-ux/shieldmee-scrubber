@@ -1,4 +1,6 @@
 # Real transcripts and their scrubbed results must never be committed.
-input/
+# The input folder itself is kept (through .gitkeep) so it is there to drop files into.
+input/*
+!input/.gitkeep
 output/
 __pycache__/

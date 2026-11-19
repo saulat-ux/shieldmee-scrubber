@@ -105,9 +105,14 @@ QUESTIONS = (PEOPLE_QUESTION, EVERYTHING_QUESTION)
 ATTEMPT_SEEDS = (42, 43)
 MAX_REPLY_TOKENS = 600
 
-OUTPUT_DIR = Path("output")
-CLINICIANS_FILE = Path("clinicians.txt")
-EXTRA_NAMES_FILE = Path("names.txt")
+# The default folders and name lists live beside this script, so it works the
+# same whichever folder it is started from. A double-clicked launcher starts
+# in the home folder, not here.
+HERE = Path(__file__).resolve().parent
+INPUT_DIR = HERE / "input"
+OUTPUT_DIR = HERE / "output"
+CLINICIANS_FILE = HERE / "clinicians.txt"
+EXTRA_NAMES_FILE = HERE / "names.txt"
 
 # A capitalised word straight after one of these is a person's name, which
 # gives a dependable way to catch "Coach Ramirez" without relying on the model.
@@ -378,11 +383,15 @@ def join_adjacent_names(people, speech_text):
 
 
 def find_transcripts(path):
-    """Accept a single file or a folder, so one command covers both uses."""
+    """Accept a single file or a folder, so one command covers both uses.
+
+    Hidden files are skipped: macOS leaves "._" copies beside files on some
+    drives, and they are not transcripts.
+    """
     if path.is_file():
         return [path]
     if path.is_dir():
-        return sorted(path.glob("*.txt"))
+        return sorted(file for file in path.glob("*.txt") if not file.name.startswith("."))
     return []
 
 
@@ -609,7 +618,7 @@ def main():
 
 def run():
     parser = argparse.ArgumentParser(description="Scrub identifiers from Zoom transcripts.")
-    parser.add_argument("path", nargs="?", default="input", type=Path,
+    parser.add_argument("path", nargs="?", default=INPUT_DIR, type=Path,
                         help="a transcript file or a folder of .txt files (default: input/)")
     parser.add_argument("--no-model", action="store_true",
                         help="rules only, for development; output is named *_RULES_ONLY.txt")
@@ -624,7 +633,13 @@ def run():
 
     clinicians = load_names(CLINICIANS_FILE)
     extra_names = load_names(EXTRA_NAMES_FILE)
+    if args.path == INPUT_DIR:
+        INPUT_DIR.mkdir(exist_ok=True)
     transcripts = find_transcripts(args.path)
+    if not transcripts and args.path == INPUT_DIR:
+        print("There are no transcripts in the input folder. Put the Zoom .txt files "
+              "there and run this again.")
+        return EXIT_INPUT_PROBLEM
     if not transcripts:
         print(f"No .txt transcripts found at '{args.path}'. Check the path and try again.")
         return EXIT_INPUT_PROBLEM
@@ -653,7 +668,8 @@ def run():
 
         counts = Counter(label.rstrip("-0123456789") for _, _, label in spans)
         summary = ", ".join(f"{count} {label}" for label, count in sorted(counts.items()))
-        print(f"{transcript.name}: {summary or 'nothing replaced'} -> {output_path}")
+        print(f"{transcript.name}: {summary or 'nothing replaced'} "
+              f"-> {output_path.relative_to(HERE)}")
         if args.show_map:
             print_map(registry)
     return EXIT_OK
