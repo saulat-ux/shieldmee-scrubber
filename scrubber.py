@@ -156,11 +156,22 @@ NOT_AN_AGE_WORD = (
     rf"|of|out|for|to|am|pm|a\.m|p\.m|o{APOSTROPHE}clock"
 )
 AGE_NUMBER = rf"(\d{{1,3}})(?![\w/:%'’-]|\.\d|{GAP}(?:{NOT_AN_AGE_WORD})\b)"
+
+# "My son is 7" is an age, but "my rent is 900" is not, so only these words
+# count after my, his, her and so on.
+RELATIVE = (
+    r"(?:(?:little|big|older|younger|baby|step)[ -]?)?"
+    r"(?:son|daughter|kid|child|boy|girl|baby|brother|sister|mom|mum|mother|dad"
+    r"|father|husband|wife|partner|boyfriend|girlfriend|fianc[eé]e?|grandma"
+    r"|grandmother|grandpa|grandfather|grandson|granddaughter|aunt|uncle|cousin"
+    r"|niece|nephew|friend|ex|oldest|youngest|eldest|middle one)"
+)
 AGE_LEAD_IN = (
     rf"(?:I{APOSTROPHE}m|I am|I was|(?:[Hh]e|[Ss]he|[Ww]ho){APOSTROPHE}s"
     rf"|(?:[Hh]e|[Ss]he|[Ww]ho) (?:is|was)|[Yy]ou{APOSTROPHE}re|[Yy]ou (?:are|were)"
     r"|(?!(?:It|That|This|There|Here|What|Which|Everything|Nothing|Something)\b)"
-    rf"[A-Z][\w'’-]+ (?:is|was))"
+    rf"[A-Z][\w'’-]+ (?:is|was)"
+    rf"|(?:[Mm]y|[Hh]is|[Hh]er|[Oo]ur|[Tt]heir|[Yy]our){GAP}{RELATIVE}{GAP}(?:is|was))"
     rf"(?:{GAP}(?:just|only|almost|nearly|about|already))?"
 )
 
