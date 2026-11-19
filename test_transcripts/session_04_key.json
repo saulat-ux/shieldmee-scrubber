@@ -1,0 +1,36 @@
+{
+  "must_remove": {
+    "speaker names": ["Dana", "Whitfield", "Siobhán", "Gallagher"],
+    "people mentioned": ["Declan", "Aoife", "Rory", "Castellano", "Victor", "Niamh", "Tanya", "Brooks", "Oyelaran", "Feldman", "Albrecht", "Fergal"],
+    "dates": ["April 14th", "22nd of June", "December 3, 2025", "2026-02-11", "6/30", "May 7th", "Oct. 2"],
+    "locations": ["Quincy", "Somerville", "Galway", "Dorchester", "Adams Street", "Norfolk County", "Cape Cod"],
+    "phone numbers": ["617.555.0148", "(617) 555-0193"],
+    "ages": ["I'm 42", "Aoife is 14", "My son is 9", "I was 16", "She was 19", "80 years old", "turned 70"],
+    "workplaces": ["Harborview Insurance", "South Shore Hospital", "Market Basket"],
+    "schools": ["Bunker Hill Community College", "Milton Ridge Academy", "Thayer Elementary"],
+    "emails": ["siobhan.g@harborview-ins.example"],
+    "addresses": ["58 Granite Avenue", "1200 Hancock Street"]
+  },
+  "must_keep": [
+    "I was 10 minutes late",
+    "put together the claims report in February",
+    "she's on her phone 24/7",
+    "May I come back to something you said earlier?",
+    "Dad never said sorry.",
+    "the three of us",
+    "Every April I fall apart a little",
+    "Oh my God, I hadn't thought of it like that.",
+    "on Mondays and Thursdays",
+    "Will you tell me more about that fear?",
+    "two hours a day",
+    "God, you're good at this.",
+    "On a scale of 1 to 10",
+    "Maybe a 7.",
+    "I'm 100 percent sure",
+    "back in 2015",
+    "It's about 50/50",
+    "Will that be a break, or more work?",
+    "At Christmas his mother asked me",
+    "Thanks for listening."
+  ]
+}

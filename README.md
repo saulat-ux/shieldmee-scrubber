@@ -48,7 +48,7 @@ The window explains what happened in plain English. If a file can't be scrubbed 
 
 - "Ollama is not running": open the Ollama app and try again. The launcher normally starts it for you.
 - "There are no transcripts in the input folder": put the .txt files into the input folder first.
-- "The model gave an unreadable answer twice in a row": run it again. If it keeps happening, contact your developer.
+- "The AI model gave an unreadable answer twice in a row": nothing was written for that file. Running it again won't help, so contact your developer.
 - "Safety check failed": nothing was written for that file. Contact your developer.
 
 

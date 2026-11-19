@@ -34,6 +34,19 @@ MODEL_TIMEOUT_SECONDS = 300
 
 ENTITY_TYPES = ("person", "location", "school", "workplace")
 
+# A small model can get stuck repeating one name. Capping the list keeps its
+# answer readable when that happens, and an answer that reaches the cap is
+# treated as stuck. The token limit is a backstop, well above what a capped
+# list needs.
+MAX_ENTITIES = 30
+MAX_REPLY_TOKENS = 1000
+
+# A retry of the same text uses a different seed, because the first seed would
+# only reproduce the same answer.
+FIRST_SEED = 42
+RETRY_SEED = 43
+
+
 def entity_schema(types):
     """Describe the only reply Ollama will accept: a list of identifiers.
 
@@ -53,6 +66,7 @@ def entity_schema(types):
                     },
                     "required": ["text", "type"],
                 },
+                "maxItems": MAX_ENTITIES,
             }
         },
         "required": ["entities"],
@@ -100,11 +114,6 @@ EVERYTHING_QUESTION = (
 )
 QUESTIONS = (PEOPLE_QUESTION, EVERYTHING_QUESTION)
 
-# A second attempt uses a different seed, because repeating the first seed
-# would only reproduce the same unreadable answer.
-ATTEMPT_SEEDS = (42, 43)
-MAX_REPLY_TOKENS = 600
-
 # The default folders and name lists live beside this script, so it works the
 # same whichever folder it is started from. A double-clicked launcher starts
 # in the home folder, not here.
@@ -123,6 +132,10 @@ PERSON_TITLES = (
 TITLES = {title.casefold() for title in PERSON_TITLES} | {"miss"}
 
 PLACE_LABELS = {"location": "[LOCATION]", "school": "[SCHOOL]", "workplace": "[WORKPLACE]"}
+
+# The model sometimes calls a college a workplace; a name containing one of
+# these words is labelled a school whatever the model said.
+SCHOOL_WORDS = re.compile(r"\b(?:School|College|University|Academy|Elementary)\b")
 
 # Capitalised words the model sometimes reports that are not identifiers.
 # "May" and "Will" are here so "May I ask" and "Will that" survive; a person
@@ -260,8 +273,8 @@ def read_entities(model, question, chunk, seed):
     """Put one question to the model about a chunk; returns (text, type) pairs.
 
     Temperature 0 and a fixed seed make the same transcript give the same
-    result on every run. The reply length is capped so a model stuck repeating
-    itself fails fast. Raises ValueError, KeyError or TypeError on an unusable reply.
+    result on every run. Raises ValueError, KeyError or TypeError on an
+    unusable reply.
     """
     instructions, example_text, example_answer, types = question
     reply = ask_ollama("/api/chat", {
@@ -282,22 +295,54 @@ def read_entities(model, question, chunk, seed):
             if isinstance(entity["text"], str) and entity["type"] in types]
 
 
-def find_model_entities(model, question, chunk):
-    """Get the model's answer to one question, allowing one retry before giving up."""
-    for seed in ATTEMPT_SEEDS:
-        try:
-            return read_entities(model, question, chunk, seed)
-        except OSError:
-            raise StopRun(EXIT_MODEL_UNAVAILABLE, (
-                "Ollama stopped responding part-way through, so nothing was written "
-                "for this file. Check the Ollama app is open and run this again."
+def split_in_half(chunk):
+    """Split a chunk into two halves sharing one line, or None if it is too short.
+
+    The shared line means a name wrapped across the middle is still whole in
+    one of the halves.
+    """
+    lines = chunk.split("\n")
+    if len(lines) < 4:
+        return None
+    middle = len(lines) // 2
+    return ["\n".join(lines[:middle + 1]), "\n".join(lines[middle:])]
+
+
+def find_model_entities(model, question, chunk, after_unreadable=False):
+    """Get the model's answer to one question about a chunk.
+
+    When the answer is unreadable or stuck at the cap, the chunk is asked
+    again in two halves: shorter text gives a shorter answer, which the model
+    does not get stuck on. A chunk too short to split is asked again with
+    another seed. Two unreadable answers in a row end the run.
+    """
+    try:
+        entities = read_entities(model, question, chunk,
+                                 RETRY_SEED if after_unreadable else FIRST_SEED)
+    except OSError:
+        raise StopRun(EXIT_MODEL_UNAVAILABLE, (
+            "Ollama stopped responding part-way through, so nothing was written "
+            "for this file. Check the Ollama app is open and run this again."
+        )) from None
+    except (ValueError, KeyError, TypeError):
+        if after_unreadable:
+            raise StopRun(EXIT_MODEL_UNREADABLE, (
+                "The AI model gave an unreadable answer twice in a row, so nothing was "
+                "written for this file. Running it again will not help, because the "
+                "model answers the same way every time. Please report this to whoever "
+                "set up this tool."
             )) from None
-        except (ValueError, KeyError, TypeError):
-            continue
-    raise StopRun(EXIT_MODEL_UNREADABLE, (
-        "The model gave an unreadable answer twice in a row, so nothing was written "
-        "for this file. Run it again, or try a different model with --model."
-    ))
+        entities = None
+
+    if entities is not None and len(entities) < MAX_ENTITIES:
+        return entities
+    halves = split_in_half(chunk)
+    if halves is None:
+        if entities is None:
+            return find_model_entities(model, question, chunk, after_unreadable=True)
+        return entities
+    return [entity for half in halves
+            for entity in find_model_entities(model, question, half, entities is None)]
 
 
 def clean_entity(text, entity_type):
@@ -366,7 +411,8 @@ def settle_types(answers):
     places = {}
     for entity, entity_type, _ in answers:
         if entity_type != "person" and entity not in sure_people:
-            places.setdefault(entity, PLACE_LABELS[entity_type])
+            label = "[SCHOOL]" if SCHOOL_WORDS.search(entity) else PLACE_LABELS[entity_type]
+            places.setdefault(entity, label)
     people = [entity for entity, entity_type, _ in answers
               if entity_type == "person" and entity not in places]
     return list(dict.fromkeys(people)), places
@@ -650,6 +696,8 @@ def run():
         except (OSError, UnicodeDecodeError) as error:
             print(f"Could not read '{transcript}': {error}")
             return EXIT_INPUT_PROBLEM
+        if not args.no_model:
+            print(f"{transcript.name}: scrubbing, this can take a few minutes...", flush=True)
         headers, blocks = parse(text)
         registry = build_registry(headers, clinicians, extra_names)
         add_titled_names(blocks, registry)
